@@ -1,16 +1,355 @@
 <!DOCTYPE html>
-<html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="apple-mobile-web-app-capable" content="yes">
-        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-        <meta name="viewport" content="user-scalable=no">
-        <link rel="icon" href="icon/icon.png" type="image/png">
-        <link rel="apple-touch-icon" href="icon/icon.png">
-        <link rel="stylesheet" type="text/css" href="css/game.css">
-        <title>Roza&#39;s Life.Ver1.2</title>
-    </head>
-    <body style="background-color: black">
-        <script type="text/javascript" src="js/main.js"></script>
-    </body>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Космический стрелок</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#05070f;
+    font-family: -apple-system, Roboto, sans-serif; color:#fff;
+    user-select:none; touch-action:none;
+  }
+  #game { display:block; width:100%; height:100%; }
+  #overlay {
+    position:fixed; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:20px;
+    background:rgba(5,7,15,0.92); backdrop-filter:blur(6px); z-index:10;
+  }
+  #overlay.hidden { display:none; }
+  h1 { font-size:32px; color:#5ec8ff; text-shadow:0 0 20px #2a80ff; }
+  p  { font-size:16px; color:#aac; text-align:center; max-width:320px; line-height:1.5; }
+  .btn {
+    padding:16px 48px; font-size:20px; font-weight:700;
+    color:#fff; background:linear-gradient(135deg,#2a80ff,#5ec8ff);
+    border:none; border-radius:14px; cursor:pointer;
+    box-shadow:0 8px 30px rgba(42,128,255,0.5);
+    transition:transform .1s;
+  }
+  .btn:active { transform:scale(0.95); }
+  .score { font-size:64px; font-weight:900; color:#5ec8ff; text-shadow:0 0 30px #2a80ff; }
+  .label { font-size:14px; color:#889; letter-spacing:2px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="overlay">
+  <h1>🚀 КОСМИЧЕСКИЙ СТРЕЛОК</h1>
+  <p>Води пальцем по экрану — корабль летит за ним.<br>Стрельба автоматическая!</p>
+  <button class="btn" onclick="startGame()">ИГРАТЬ</button>
+</div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.expand(); tg.ready(); }
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth * devicePixelRatio;
+  H = canvas.height = window.innerHeight * devicePixelRatio;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+let state = null;
+let running = false;
+let lastTime = 0;
+let shootCooldown = 0;
+let enemySpawnTimer = 0;
+
+const PLAYER_W = 60, PLAYER_H = 35;
+const ENEMY_SIZE = 38;
+
+function initState() {
+  return {
+    player: { x: W/2, y: H - 120, targetX: W/2 },
+    bullets: [],
+    enemies: [],
+    particles: [],
+    stars: Array.from({length:80}, () => ({
+      x: Math.random()*W,
+      y: Math.random()*H,
+      r: (Math.random()*2+0.5)*devicePixelRatio,
+      speed: (Math.random()*2.5+0.5)*devicePixelRatio,
+    })),
+    score: 0,
+    lives: 3,
+    level: 1,
+    invuln: 0,
+  };
+}
+
+function startGame() {
+  overlay.classList.add('hidden');
+  state = initState();
+  running = true;
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
+}
+
+function pointerMove(clientX) {
+  if (!state) return;
+  const x = clientX * devicePixelRatio;
+  state.player.targetX = Math.max(PLAYER_W/2, Math.min(W - PLAYER_W/2, x));
+}
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  pointerMove(e.touches[0].clientX);
+}, {passive:false});
+canvas.addEventListener('touchstart', e => {
+  pointerMove(e.touches[0].clientX);
+});
+canvas.addEventListener('mousemove', e => pointerMove(e.clientX));
+
+function spawnEnemy() {
+  const x = (Math.random() * (W - ENEMY_SIZE*2)) + ENEMY_SIZE;
+  state.enemies.push({
+    x, y: -ENEMY_SIZE,
+    speed: (2 + state.level * 0.4) * devicePixelRatio,
+    hp: 1,
+    rot: Math.random() * Math.PI,
+  });
+}
+
+function spawnParticles(x, y, color, count=12) {
+  for (let i=0;i<count;i++) {
+    const a = Math.random()*Math.PI*2;
+    const s = (Math.random()*5+2)*devicePixelRatio;
+    state.particles.push({
+      x, y,
+      vx: Math.cos(a)*s,
+      vy: Math.sin(a)*s,
+      life: 1,
+      color,
+      size: (Math.random()*3+1)*devicePixelRatio,
+    });
+  }
+}
+
+function update(dt) {
+  const d = devicePixelRatio;
+  const P = state.player;
+
+  P.x += (P.targetX - P.x) * Math.min(1, dt * 0.012);
+
+  shootCooldown -= dt;
+  if (shootCooldown <= 0) {
+    shootCooldown = 220;
+    state.bullets.push({ x: P.x, y: P.y - 20*d, speed: 14*d });
+  }
+
+  for (const b of state.bullets) b.y -= b.speed * dt / 16;
+  state.bullets = state.bullets.filter(b => b.y > -30);
+
+  enemySpawnTimer -= dt;
+  if (enemySpawnTimer <= 0) {
+    enemySpawnTimer = Math.max(300, 900 - state.level*70);
+    spawnEnemy();
+  }
+
+  for (const e of state.enemies) {
+    e.y += e.speed * dt / 16;
+    e.rot += 0.02;
+  }
+
+  for (const b of state.bullets) {
+    for (const e of state.enemies) {
+      if (e.hp > 0 && Math.hypot(b.x - e.x, b.y - e.y) < ENEMY_SIZE*0.9*d) {
+        e.hp = 0;
+        b.y = -999;
+        state.score += 10;
+        spawnParticles(e.x, e.y, '#ff4757', 14);
+        if (state.score > 0 && state.score % 100 === 0) state.level++;
+        break;
+      }
+    }
+  }
+  state.enemies = state.enemies.filter(e => e.hp > 0);
+
+  for (const e of state.enemies) {
+    if (e.y > H + ENEMY_SIZE) {
+      e.hp = 0;
+      state.lives--;
+      spawnParticles(W/2, H-50, '#ff4757', 25);
+      if (state.lives <= 0) gameOver();
+    }
+  }
+  state.enemies = state.enemies.filter(e => e.hp > 0);
+
+  for (const p of state.particles) {
+    p.x += p.vx * dt / 16;
+    p.y += p.vy * dt / 16;
+    p.vx *= 0.96; p.vy *= 0.96;
+    p.life -= dt / 600;
+  }
+  state.particles = state.particles.filter(p => p.life > 0);
+
+  for (const s of state.stars) {
+    s.y += s.speed * dt / 16;
+    if (s.y > H) { s.y = 0; s.x = Math.random()*W; }
+  }
+
+  state.invuln = Math.max(0, state.invuln - dt);
+}
+
+function draw() {
+  const d = devicePixelRatio;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0a0e27');
+  g.addColorStop(1, '#05070f');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#fff';
+  for (const s of state.stars) {
+    ctx.globalAlpha = 0.3 + s.r / (3*d);
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const e of state.enemies) {
+    const sz = ENEMY_SIZE * d;
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(e.rot * 0.3);
+    ctx.shadowColor = '#ff4757';
+    ctx.shadowBlur = 15;
+    ctx.beginPath();
+    ctx.moveTo(0, sz/2);
+    ctx.lineTo(-sz/2, -sz/2);
+    ctx.lineTo(sz/2, -sz/2);
+    ctx.closePath();
+    ctx.fillStyle = '#ff4757';
+    ctx.fill();
+    ctx.strokeStyle = '#ffb8b8';
+    ctx.lineWidth = 2*d;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  for (const b of state.bullets) {
+    ctx.shadowColor = '#7dff7d';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = '#7dff7d';
+    ctx.fillRect(b.x - 3*d, b.y - 9*d, 6*d, 18*d);
+    ctx.shadowBlur = 0;
+  }
+
+  for (const p of state.particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  const P = state.player;
+  ctx.save();
+  ctx.translate(P.x, P.y);
+
+  if (state.invuln > 0 && Math.floor(state.invuln / 100) % 2) ctx.globalAlpha = 0.4;
+
+  const flick = 0.7 + Math.random()*0.3;
+  ctx.shadowColor = '#ffa500';
+  ctx.shadowBlur = 25 * flick;
+  ctx.fillStyle = `rgba(255,165,0,${flick})`;
+  ctx.beginPath();
+  ctx.arc(0, PLAYER_H/2, 12*d, 0, Math.PI*2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#5ec8ff';
+  ctx.shadowColor = '#2a80ff';
+  ctx.shadowBlur = 20;
+  roundRect(-PLAYER_W/2*d, -PLAYER_H/2*d, PLAYER_W*d, PLAYER_H*d, 10*d);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#ffe97d';
+  ctx.beginPath();
+  ctx.ellipse(0, -5*d, 9*d, 12*d, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ff6b00';
+  ctx.beginPath(); ctx.arc(-18*d, PLAYER_H/2, 6*d, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc( 18*d, PLAYER_H/2, 6*d, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+  ctx.globalAlpha = 1;
+
+  ctx.font = `bold ${20*d}px -apple-system, Roboto, sans-serif`;
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Счёт: ${state.score}`, 16*d, 34*d);
+  ctx.textAlign = 'right';
+  ctx.fillText(`Ур. ${state.level}`, W - 16*d, 34*d);
+
+  for (let i = 0; i < state.lives; i++) {
+    drawHeart(20*d + i*30*d, 60*d, 8*d);
+  }
+}
+
+function drawHeart(x, y, r) {
+  ctx.fillStyle = '#ff4757';
+  ctx.beginPath();
+  ctx.arc(x - r/2, y - r/3, r/2, 0, Math.PI*2);
+  ctx.arc(x + r/2, y - r/3, r/2, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x - r, y - r/6);
+  ctx.lineTo(x, y + r);
+  ctx.lineTo(x + r, y - r/6);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+function loop(now) {
+  if (!running) return;
+  const dt = Math.min(50, now - lastTime);
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function gameOver() {
+  running = false;
+  const score = state.score;
+
+  overlay.innerHTML = `
+    <div class="label">GAME OVER</div>
+    <div class="score">${score}</div>
+    <p>${score >= 100 ? '🔥 Отличный результат!' : 'Попробуй ещё раз!'}</p>
+    <button class="btn" onclick="startGame()">ЕЩЁ РАЗ</button>
+  `;
+  overlay.classList.remove('hidden');
+
+  if (tg) {
+    try { tg.sendData(JSON.stringify({ score })); } catch(e) {}
+  }
+}
+</script>
+</body>
 </html>
